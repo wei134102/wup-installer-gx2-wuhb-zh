@@ -2,5 +2,6 @@
 *.elf
 *.rpx
 *.wuhb
+/1
 
 src/resources/filelist.h

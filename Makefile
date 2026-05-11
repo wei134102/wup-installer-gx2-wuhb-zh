@@ -58,12 +58,15 @@ DRC_SPLASH		:= meta/drc-splash.png
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(MACHDEP)
 CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
+# glm 头文件在 portlibs（需已安装 ppc-glm / wiiu-glm），否则报 glm/glm.hpp 找不到
+CFLAGS	+=	-I$(PORTLIBS)/include
 
 CXXFLAGS	:= $(CFLAGS)
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-g $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
-LIBS	:= -lwut -lgd -lpng -ljpeg -lz -lfreetype -lbz2 -lmad -lvorbisidec -logg
+# ppc-freetype 2.14+ 启用 brotli（WOFF2），须链接 brotli，否则 undefined reference to BrotliDecoderDecompress
+LIBS	:= -lwut -lgd -lpng -ljpeg -lz -lfreetype -lbrotlidec -lbrotlicommon -lbz2 -lmad -lvorbisidec -logg
 
 #-------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level
@@ -113,22 +116,19 @@ export OFILES 	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) \
 					$(addsuffix .o,$(BINFILES))
 export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
 
-export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-					$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-					-I$(CURDIR)/$(BUILD) -I$(PORTLIBS)/include \
-					-I$(PORTLIBS_PATH)/ppc/include/freetype2
-
 export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
 export OFILES_SRC	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
 export OFILES 	:=	$(OFILES_BIN) $(OFILES_SRC)
 export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
 
+# 须含 portlibs 的 glm 等头文件；勿再覆盖为不含 $(PORTLIBS)/include 的短列表（会找不到 glm/glm.hpp）
 export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-			-I$(CURDIR)/$(BUILD) -I$(PORTLIBS_PATH)/ppc/include/freetype2
-
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+			-I$(CURDIR)/$(BUILD) \
+			-I$(PORTLIBS)/include \
+			-I$(DEVKITPRO)/portlibs/wiiu/include \
+			-I$(PORTLIBS_PATH)/ppc/include/freetype2
 
 ifneq (,$(strip $(CONTENT)))
 	export APP_CONTENT := $(TOPDIR)/$(CONTENT)

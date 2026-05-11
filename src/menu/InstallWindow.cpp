@@ -20,17 +20,108 @@
 #include "utils/StringTools.h"
 #include "common/common.h"
 #include "system/power.h"
+#include <cstdio>
+#include <string>
 #include <coreinit/mcp.h>
 #include <coreinit/memory.h>
 #include <coreinit/ios.h>
+#include <coreinit/thread.h>
+#include <coreinit/time.h>
+#include <cstring>
 
 #define MCP_COMMAND_INSTALL_ASYNC   0x81
+//! 已装在目标设备上，跳过安装（InstallProcess 内使用，勿与普通成功混淆）
+#define INSTALL_RESULT_SKIP_DUPLICATE 88
 #define MAX_INSTALL_PATH_LENGTH     0x27F
 
 static int installCompleted = 0;
 static u32 installError = 0;
 
 extern "C" MCPError MCP_GetLastRawError(void);
+
+//! 与官方安装目标一致：从 MCP 设备表取当前「选 NAND / 选 USB」对应的存储根路径（不写死 storage_usb 等卷名）。
+static const char *McpStripVolPrefix(const char *p)
+{
+	if (!p)
+		return "";
+	if (strncmp(p, "fs:/vol/", 8) == 0)
+		return p + 8;
+	if (strncmp(p, "/vol/", 5) == 0)
+		return p + 5;
+	return p;
+}
+
+static const char *SkipLeadingSlashes(const char *p)
+{
+	if (!p)
+		return "";
+	while (*p == '/' || *p == '\\')
+		++p;
+	return p;
+}
+
+//! title 路径是否落在 MCP 给出的安装卷根之下（与 MCP_InstallSetTarget* 选中的存储一致）
+static bool TitlePathUnderMcpRoot(const char *titlePath, const char *storageRoot)
+{
+	const char *pn = SkipLeadingSlashes(McpStripVolPrefix(titlePath));
+	const char *rn = SkipLeadingSlashes(McpStripVolPrefix(storageRoot));
+	if (!pn[0] || !rn[0])
+		return false;
+	size_t lr = strlen(rn);
+	while (lr > 0 && (rn[lr - 1] == '/' || rn[lr - 1] == '\\'))
+		--lr;
+	if (lr == 0)
+		return false;
+	if (strncmp(pn, rn, lr) != 0)
+		return false;
+	return pn[lr] == '\0' || pn[lr] == '/';
+}
+
+static bool LookupMcpInstallStorageRoot(unsigned int mcpHandle, bool installToUsb, char *outRoot, size_t outRootBytes)
+{
+	if (!outRoot || outRootBytes < 2)
+		return false;
+	outRoot[0] = '\0';
+	const uint32_t kMaxDev = 32u;
+	const uint32_t listBytes = kMaxDev * (uint32_t)sizeof(MCPDevice);
+	MCPDevice *devs = (MCPDevice *)OSAllocFromSystem(listBytes, 0x40);
+	if (!devs)
+		return false;
+	memset(devs, 0, listBytes);
+	int num = 0;
+	MCPError err = MCP_FullDeviceList((int)mcpHandle, &num, devs, listBytes);
+	bool got = false;
+	if (err == 0 && num > 0)
+	{
+		const int n = num > (int)kMaxDev ? (int)kMaxDev : num;
+		for (int i = 0; i < n; ++i)
+		{
+			const char *ty = devs[i].type;
+			const char *rp = devs[i].path;
+			if (!rp || !rp[0])
+				continue;
+			bool want = false;
+			if (installToUsb)
+			{
+				if (ty[0] == 'u' && ty[1] == 's' && ty[2] == 'b')
+					want = true;
+			}
+			else
+			{
+				if (ty[0] == 'm' && ty[1] == 'l' && ty[2] == 'c')
+					want = true;
+			}
+			if (want)
+			{
+				snprintf(outRoot, outRootBytes, "%s", rp);
+				got = true;
+				break;
+			}
+		}
+	}
+	OSFreeToSystem(devs);
+	return got && outRoot[0] != '\0';
+}
 
 static void* IosInstallCallback(IOSError errorCode, void * priv_data)
 {
@@ -39,10 +130,54 @@ static void* IosInstallCallback(IOSError errorCode, void * priv_data)
 	return 0;
 }
 
+void InstallWindow::AppendInstallLog(const std::string & line)
+{
+	static const char *kLogPaths[] = {
+		"fs:/vol/external01/wup_install_gx2.log",
+		"fs:/vol/external01/install/wup_install_gx2.log",
+		"/vol/app_sd/wup_install_gx2.log",
+		nullptr
+	};
+	for (int i = 0; kLogPaths[i]; ++i)
+	{
+		FILE *f = fopen(kLogPaths[i], "a");
+		if (f)
+		{
+			std::fprintf(f, "[%llu] %s\n", (unsigned long long)OSGetTime(), line.c_str());
+			std::fclose(f);
+			return;
+		}
+	}
+}
+
+void InstallWindow::OnAbortCurrentInstall(GuiElement *, int)
+{
+	abortCurrentInstall = true;
+}
+
+void InstallWindow::OnFailContinueYes(GuiElement *, int)
+{
+	failContinueChoice = 1;
+}
+
+void InstallWindow::OnFailContinueNo(GuiElement *, int)
+{
+	failContinueChoice = 2;
+}
+
+void InstallWindow::OnDuplicateSkipOk(GuiElement *, int)
+{
+	duplicateSkipAck = 1;
+	OSMemoryBarrier();
+}
+
 InstallWindow::InstallWindow(CFolderList * list)
 	: GuiFrame(0, 0)
 	, CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff)
 	, folderList(list)
+	, abortCurrentInstall(false)
+	, failContinueChoice(0)
+	, duplicateSkipAck(0)
 {   
 	mainWindow = Application::instance()->getMainWindow();
 	
@@ -117,6 +252,8 @@ void InstallWindow::executeThread()
 	
 	int total = folderList->GetSelectedCount();
 	int pos = 1;
+
+	AppendInstallLog(strfmt("===== 批量安装开始 共 %d 项 =====", total));
 	
 	while(pos <= total && !canceled)
 	{
@@ -151,6 +288,8 @@ void InstallWindow::executeThread()
 	
 	OSEnableHomeButtonMenu(true);
 	Application::instance()->exitEnable();
+
+	AppendInstallLog(strfmt("===== 批量安装结束 canceled=%d =====", canceled ? 1 : 0));
 }
 
 void InstallWindow::InstallProcess(int pos, int total)
@@ -159,8 +298,13 @@ void InstallWindow::InstallProcess(int pos, int total)
 	
 	std::string title = fmt("安装中... (%d/%d)", pos, total);
 	std::string gameName = folderList->GetName(index);
-	
-	messageBox->reload(title, gameName, "", MessageBox::BT_NOBUTTON, MessageBox::IT_ICONINFORMATION, true, "0.0 %");
+
+	abortCurrentInstall = false;
+	messageBox->messageCancelClicked.disconnect(this);
+	messageBox->reload(title, gameName, "按「取消」可中止本项（调用 MCP 中止）", MessageBox::BT_CANCEL, MessageBox::IT_ICONINFORMATION, true, "0.0 %");
+	messageBox->messageCancelClicked.connect(this, &InstallWindow::OnAbortCurrentInstall);
+
+	AppendInstallLog(strfmt("START [%d/%d] %s", pos, total, gameName.c_str()));
 	
 	/////////////////////////////
 	// install process
@@ -248,6 +392,124 @@ void InstallWindow::InstallProcess(int pos, int total)
 					result = -6;
 					break;
 				}
+
+				//! 已安装检测：MCP_GetTitleInfo 按完整 64 位 TID（本体/DLC/更新等为不同 TID）。
+				//! 是否与「当前选中的安装目标」同卷：以 MCP_FullDeviceList 返回的 MCPDevice.path 为根（与官方 MCP_InstallSetTarget* 所用存储一致），与 title 的 path 做前缀匹配，不写死 storage_usb 等名。
+				{
+					uint64_t installTid = ((uint64_t)titleIdHigh << 32) | (uint64_t)titleIdLow;
+					MCPTitleListType tinfo;
+					memset(&tinfo, 0, sizeof(tinfo));
+					MCPError ge = MCP_GetTitleInfo((int32_t)mcpHandle, installTid, &tinfo);
+
+					bool duplicate = false;
+					if (ge == 0)
+					{
+						const char *idev = tinfo.indexedDevice;
+						const char *p = tinfo.path;
+						const bool installToUsb = (target == USB);
+						char storageRoot[0x280];
+						const bool haveMcpRoot = LookupMcpInstallStorageRoot(mcpHandle, installToUsb, storageRoot, sizeof(storageRoot));
+
+						auto sub = [](const char *s, const char *needle) -> bool {
+							return s && strstr(s, needle) != nullptr;
+						};
+
+						if (haveMcpRoot && p && p[0])
+						{
+							duplicate = TitlePathUnderMcpRoot(p, storageRoot);
+						}
+						else if (haveMcpRoot && (!p || !p[0]))
+						{
+							const bool usbI = sub(idev, "usb");
+							const bool mlcI = sub(idev, "mlc") || sub(idev, "slc");
+							if (installToUsb)
+								duplicate = usbI;
+							else
+								duplicate = mlcI && !usbI;
+						}
+						else
+						{
+							//! 设备表不可用时的回退（仍尽量避免误杀）
+							const bool usbHint = sub(p, "storage_usb") || sub(idev, "usb");
+							const bool mlcHint = sub(p, "storage_mlc") || sub(p, "storage_slc")
+								|| sub(idev, "mlc") || sub(idev, "slc");
+							if (!usbHint && !mlcHint)
+								duplicate = false;
+							else if (installToUsb)
+								duplicate = usbHint;
+							else
+								duplicate = !usbHint;
+						}
+
+						AppendInstallLog(strfmt(
+							"DUPCHK GetTitleInfo=OK tid=%016llx want=%s mcpRootOk=%d dup=%d root=[%s] path=[%s] idx=[%s]",
+							(unsigned long long)installTid,
+							installToUsb ? "USB" : "NAND",
+							haveMcpRoot ? 1 : 0,
+							duplicate ? 1 : 0,
+							haveMcpRoot ? storageRoot : "-",
+							p ? p : "",
+							idev ? idev : ""));
+					}
+					else
+					{
+						AppendInstallLog(strfmt("DUPCHK GetTitleInfo=%d tid=%016llx (not installed or err) game=%s",
+							(int)ge, (unsigned long long)installTid, gameName.c_str()));
+					}
+
+					if (duplicate)
+					{
+						const char *locStr = (target == NAND) ? "NAND(mlc)" : "USB";
+						AppendInstallLog(strfmt("SKIP already installed TitleID=%016llx target=%s game=%s",
+							(unsigned long long)installTid, locStr, gameName.c_str()));
+						messageBox->messageOkClicked.disconnect(this);
+						messageBox->messageYesClicked.disconnect(this);
+						messageBox->messageNoClicked.disconnect(this);
+						messageBox->messageCancelClicked.disconnect(this);
+						duplicateSkipAck = 0;
+						OSMemoryBarrier();
+
+						std::string dupBody = fmt("安装目标 %s，本机已存在 Title 0x%016llx（设备:%s），跳过。",
+							locStr, (unsigned long long)installTid, tinfo.indexedDevice[0] ? tinfo.indexedDevice : "?");
+						const bool batchQueue = (total > 1);
+						if (batchQueue)
+							dupBody += "\n批量安装：按「确认」立即继续下一项；或等待下方倒计时自动继续。";
+						else
+							dupBody += "\n按「确认」关闭本提示。";
+
+						messageBox->reload("已安装 跳过", gameName, dupBody,
+							MessageBox::BT_OK, MessageBox::IT_ICONINFORMATION);
+						messageBox->messageOkClicked.connect(this, &InstallWindow::OnDuplicateSkipOk);
+
+						const u64 dupWaitStart = OSGetTime();
+						int prevCountdownSec = -1;
+						while (duplicateSkipAck == 0 && !canceled)
+						{
+							OSMemoryBarrier();
+							if (batchQueue)
+							{
+								const u32 elapsedMs = OSTicksToMilliseconds(OSGetTime() - dupWaitStart);
+								if (elapsedMs >= 3000u)
+								{
+									duplicateSkipAck = 1;
+									OSMemoryBarrier();
+									break;
+								}
+								const int secLeft = 3 - (int)(elapsedMs / 1000u);
+								if (secLeft != prevCountdownSec && secLeft >= 1 && secLeft <= 3)
+								{
+									prevCountdownSec = secLeft;
+									messageBox->setMessage2(dupBody + fmt("\n%d 秒后自动继续下一项…", secLeft));
+								}
+							}
+							usleep(16666);
+							OSYieldThread();
+						}
+						messageBox->messageOkClicked.disconnect(this);
+						result = INSTALL_RESULT_SKIP_DUPLICATE;
+						break;
+					}
+				}
 				
 				mcpInstallInfo[2] = (unsigned int)MCP_COMMAND_INSTALL_ASYNC;
 				mcpInstallInfo[3] = (unsigned int)mcpPathInfoVector;
@@ -269,10 +531,23 @@ void InstallWindow::InstallProcess(int pos, int total)
 					break;
 				}
 				
+				u64 lastInstalledSize = (u64)-1;
+				int stallIterations = 0;
+				//! 约 50ms * 3600 ≈ 3 分钟无字节增长则视为卡死并请求中止
+				const int kStallIterationLimit = 3600;
+				u64 waitAbortDeadline = 0;
+
 				while(!installCompleted)
 				{
+					if (abortCurrentInstall && waitAbortDeadline == 0)
+					{
+						MCP_InstallTitleAbort((int)mcpHandle);
+						AppendInstallLog(strfmt("ABORT requested MCP_InstallTitleAbort: %s", gameName.c_str()));
+						waitAbortDeadline = OSGetTime();
+						abortCurrentInstall = false;
+					}
+
 					memset(mcpInstallInfo, 0, 0x24);
-					
 					MCP_InstallGetProgress(mcpHandle, (MCPInstallProgress*)mcpInstallInfo);
 					
 					if(mcpInstallInfo[0] == 1)
@@ -286,10 +561,46 @@ void InstallWindow::InstallProcess(int pos, int total)
 						
 						messageBox->setProgress(percent);
 						messageBox->setProgressBarInfo(message);
+
+						//! 仅在「未完成」时检测停滞，避免 100% 等待 IOS 收尾时误判
+						if (totalSize > 0 && installedSize < totalSize)
+						{
+							if (installedSize == lastInstalledSize)
+								stallIterations++;
+							else
+							{
+								stallIterations = 0;
+								lastInstalledSize = installedSize;
+							}
+							if (stallIterations >= kStallIterationLimit)
+							{
+								MCP_InstallTitleAbort((int)mcpHandle);
+								AppendInstallLog(strfmt("STALL timeout MCP_InstallTitleAbort: %s", gameName.c_str()));
+								stallIterations = 0;
+								if (waitAbortDeadline == 0)
+									waitAbortDeadline = OSGetTime();
+							}
+						}
+						else
+							stallIterations = 0;
+					}
+
+					if (waitAbortDeadline != 0 && OSTicksToMilliseconds(OSGetTime() - waitAbortDeadline) > 120000)
+					{
+						if (!installCompleted)
+						{
+							AppendInstallLog(strfmt("WARN abort wait 120s no callback: %s", gameName.c_str()));
+							installCompleted = 1;
+							installError = 0xEAAAAAAB;
+						}
+						waitAbortDeadline = 0;
 					}
 					
 					usleep(50000);
 				}
+
+				messageBox->messageCancelClicked.disconnect(this);
+				waitAbortDeadline = 0;
 				
 				if(installError != 0)
 				{
@@ -311,6 +622,10 @@ void InstallWindow::InstallProcess(int pos, int total)
 							messageBox->reload("安装失败", gameName, "SD卡可能已损坏。重新格式化(簇大小选32k)或更换SD卡。", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						else if ((installError & 0xFFFF0000) == 0xFFFB0000)
 							messageBox->reload("安装失败", gameName, "检查WUP是否正确完整。数字版游戏和DLC需要Sig-Patches。", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						else if (installError == 0xEAAAAAAB)
+							messageBox->reload("安装中止", gameName, "已请求中止但长时间未收到 IOS 回调。", MessageBox::BT_OK, MessageBox::IT_ICONERROR);
+						else
+							messageBox->reload("安装失败", gameName, fmt("错误代码 0x%08X", installError), MessageBox::BT_OK, MessageBox::IT_ICONERROR);
 						
 						result = -9;
 					}
@@ -333,9 +648,29 @@ void InstallWindow::InstallProcess(int pos, int total)
 			OSFreeToSystem(mcpInstallInfo);
 	}
 	/////////////////////////////
+
+	messageBox->messageCancelClicked.disconnect(this);
 	
-	if(result >= 0)
+	if (result == INSTALL_RESULT_SKIP_DUPLICATE)
 	{
+		folderList->UnSelect(index);
+		messageBox->messageOkClicked.disconnect(this);
+		messageBox->messageCancelClicked.disconnect(this);
+		if (pos < total)
+		{
+			messageBox->reload("已跳过（已安装）", gameName, "6秒后进行下个软件安装", MessageBox::BT_CANCEL, MessageBox::IT_ICONINFORMATION);
+			messageBox->messageCancelClicked.connect(this, &InstallWindow::OnInstallProcessCancel);
+		}
+		else
+		{
+			messageBox->reload("已跳过（已安装）", gameName, "该内容已在所选安装目标上。", MessageBox::BT_OK, MessageBox::IT_ICONINFORMATION);
+			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+		}
+	}
+	else if(result >= 0)
+	{
+		AppendInstallLog(strfmt("OK %s", gameName.c_str()));
+
 		if(pos == total)
 		{
 			messageBox->reload("安装完成", gameName, "", MessageBox::BT_OK, MessageBox::IT_ICONTRUE);
@@ -351,10 +686,36 @@ void InstallWindow::InstallProcess(int pos, int total)
 	}
 	else
 	{
-		messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
-		
-		canceled = true;
-		folderList->UnSelectAll();
+		messageBox->messageOkClicked.disconnect(this);
+		messageBox->messageYesClicked.disconnect(this);
+		messageBox->messageNoClicked.disconnect(this);
+
+		AppendInstallLog(strfmt("FAIL result=%d ios_err=0x%08X game=%s", result, installError, gameName.c_str()));
+
+		failContinueChoice = 0;
+		messageBox->reload("安装失败", gameName, "是否继续安装队列中的下一项？", MessageBox::BT_YESNO, MessageBox::IT_ICONERROR);
+		messageBox->messageYesClicked.connect(this, &InstallWindow::OnFailContinueYes);
+		messageBox->messageNoClicked.connect(this, &InstallWindow::OnFailContinueNo);
+		while (failContinueChoice == 0 && !canceled)
+			usleep(20000);
+		messageBox->messageYesClicked.disconnect(this);
+		messageBox->messageNoClicked.disconnect(this);
+
+		if (failContinueChoice == 0)
+			failContinueChoice = 2;
+
+		if (failContinueChoice == 1)
+		{
+			folderList->UnSelect(index);
+			AppendInstallLog(strfmt("CONTINUE queue after fail, skipped: %s", gameName.c_str()));
+		}
+		else
+		{
+			canceled = true;
+			folderList->UnSelectAll();
+			messageBox->reload("已结束", "安装队列已取消", "", MessageBox::BT_OK, MessageBox::IT_ICONINFORMATION);
+			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+		}
 	}
 }
 
