@@ -17,6 +17,7 @@
 #include <coreinit/foreground.h>
 #include <proc_ui/procui.h>
 #include "Application.h"
+#include "menu/InstallWindow.h"
 #include "gui/FreeTypeGX.h"
 #include "gui/GuiImageAsync.h"
 #include "gui/VPadController.h"
@@ -31,6 +32,8 @@
 Application *Application::applicationInstance = NULL;
 bool Application::exitApplication = false;
 bool Application::quitRequest = false;
+
+static bool sInstallLogSessionInit = false;
 
 Application::Application()
 	: CThread(CThread::eAttributeAffCore0 | CThread::eAttributePinnedAff, 0, 0x20000)
@@ -227,6 +230,12 @@ void Application::executeThread(void)
 	{
 	    if(procUI() == false)
 			continue;
+
+		if (!sInstallLogSessionInit && mainWindow != nullptr)
+		{
+			sInstallLogSessionInit = true;
+			InstallWindow::InitInstallLogAtStartup();
+		}
 		
 		mainWindow->lockGUI();
 		//! Read out inputs

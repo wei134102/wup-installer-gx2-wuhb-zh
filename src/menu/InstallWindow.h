@@ -18,6 +18,9 @@ public:
 	{
 		resumeThread();
 	}
+
+	//! 启动时若已有安装日志则备份为 .bak 再写入新会话（由 Application 主循环调用一次）
+	static void InitInstallLogAtStartup();
 	
 	sigslot::signal1<GuiElement *> installWindowClosed;
 	

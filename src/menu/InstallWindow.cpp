@@ -130,17 +130,43 @@ static void* IosInstallCallback(IOSError errorCode, void * priv_data)
 	return 0;
 }
 
+static const char *const kInstallLogPaths[] = {
+	"fs:/vol/external01/wup_install_gx2.log",
+	"fs:/vol/external01/install/wup_install_gx2.log",
+	"/vol/app_sd/wup_install_gx2.log",
+	nullptr
+};
+
+void InstallWindow::InitInstallLogAtStartup()
+{
+	static bool sDone = false;
+	if (sDone)
+		return;
+	sDone = true;
+
+	for (int i = 0; kInstallLogPaths[i]; ++i)
+	{
+		FILE *probe = fopen(kInstallLogPaths[i], "rb");
+		if (!probe)
+			continue;
+		std::fclose(probe);
+
+		char bakPath[384];
+		snprintf(bakPath, sizeof(bakPath), "%s.bak", kInstallLogPaths[i]);
+		::remove(bakPath);
+		if (::rename(kInstallLogPaths[i], bakPath) != 0)
+		{
+			::remove(kInstallLogPaths[i]);
+		}
+		break;
+	}
+}
+
 void InstallWindow::AppendInstallLog(const std::string & line)
 {
-	static const char *kLogPaths[] = {
-		"fs:/vol/external01/wup_install_gx2.log",
-		"fs:/vol/external01/install/wup_install_gx2.log",
-		"/vol/app_sd/wup_install_gx2.log",
-		nullptr
-	};
-	for (int i = 0; kLogPaths[i]; ++i)
+	for (int i = 0; kInstallLogPaths[i]; ++i)
 	{
-		FILE *f = fopen(kLogPaths[i], "a");
+		FILE *f = fopen(kInstallLogPaths[i], "a");
 		if (f)
 		{
 			std::fprintf(f, "[%llu] %s\n", (unsigned long long)OSGetTime(), line.c_str());
@@ -168,7 +194,7 @@ void InstallWindow::OnFailContinueNo(GuiElement *, int)
 void InstallWindow::OnDuplicateSkipOk(GuiElement *, int)
 {
 	duplicateSkipAck = 1;
-	OSMemoryBarrier();
+	__sync_synchronize();
 }
 
 InstallWindow::InstallWindow(CFolderList * list)
@@ -467,7 +493,7 @@ void InstallWindow::InstallProcess(int pos, int total)
 						messageBox->messageNoClicked.disconnect(this);
 						messageBox->messageCancelClicked.disconnect(this);
 						duplicateSkipAck = 0;
-						OSMemoryBarrier();
+						__sync_synchronize();
 
 						std::string dupBody = fmt("安装目标 %s，本机已存在 Title 0x%016llx（设备:%s），跳过。",
 							locStr, (unsigned long long)installTid, tinfo.indexedDevice[0] ? tinfo.indexedDevice : "?");
@@ -485,14 +511,14 @@ void InstallWindow::InstallProcess(int pos, int total)
 						int prevCountdownSec = -1;
 						while (duplicateSkipAck == 0 && !canceled)
 						{
-							OSMemoryBarrier();
+							__sync_synchronize();
 							if (batchQueue)
 							{
 								const u32 elapsedMs = OSTicksToMilliseconds(OSGetTime() - dupWaitStart);
 								if (elapsedMs >= 3000u)
 								{
 									duplicateSkipAck = 1;
-									OSMemoryBarrier();
+									__sync_synchronize();
 									break;
 								}
 								const int secLeft = 3 - (int)(elapsedMs / 1000u);
@@ -656,15 +682,15 @@ void InstallWindow::InstallProcess(int pos, int total)
 		folderList->UnSelect(index);
 		messageBox->messageOkClicked.disconnect(this);
 		messageBox->messageCancelClicked.disconnect(this);
+		//! 不再二次弹出「已跳过」：「已安装 跳过」对话框已说明原因；队列仅切到中性倒计时界面
 		if (pos < total)
 		{
-			messageBox->reload("已跳过（已安装）", gameName, "6秒后进行下个软件安装", MessageBox::BT_CANCEL, MessageBox::IT_ICONINFORMATION);
+			messageBox->reload("安装队列", gameName, "6秒后进行下个软件安装", MessageBox::BT_CANCEL, MessageBox::IT_ICONINFORMATION);
 			messageBox->messageCancelClicked.connect(this, &InstallWindow::OnInstallProcessCancel);
 		}
 		else
 		{
-			messageBox->reload("已跳过（已安装）", gameName, "该内容已在所选安装目标上。", MessageBox::BT_OK, MessageBox::IT_ICONINFORMATION);
-			messageBox->messageOkClicked.connect(this, &InstallWindow::OnCloseWindow);
+			OnCloseWindow(this, 0);
 		}
 	}
 	else if(result >= 0)
