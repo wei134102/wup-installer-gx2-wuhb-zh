@@ -184,11 +184,13 @@ void InstallWindow::OnAbortCurrentInstall(GuiElement *, int)
 void InstallWindow::OnFailContinueYes(GuiElement *, int)
 {
 	failContinueChoice = 1;
+	__sync_synchronize();
 }
 
 void InstallWindow::OnFailContinueNo(GuiElement *, int)
 {
 	failContinueChoice = 2;
+	__sync_synchronize();
 }
 
 void InstallWindow::OnDuplicateSkipOk(GuiElement *, int)
@@ -719,11 +721,39 @@ void InstallWindow::InstallProcess(int pos, int total)
 		AppendInstallLog(strfmt("FAIL result=%d ios_err=0x%08X game=%s", result, installError, gameName.c_str()));
 
 		failContinueChoice = 0;
-		messageBox->reload("安装失败", gameName, "是否继续安装队列中的下一项？", MessageBox::BT_YESNO, MessageBox::IT_ICONERROR);
+		__sync_synchronize();
+
+		std::string failPrompt =
+			"是否继续安装队列中的下一项？\n"
+			"「是」继续下一项；「否」取消队列。\n"
+			"无操作则 10 秒后自动选择「是」。";
+		messageBox->reload("安装失败", gameName, failPrompt,
+			MessageBox::BT_YESNO, MessageBox::IT_ICONERROR);
 		messageBox->messageYesClicked.connect(this, &InstallWindow::OnFailContinueYes);
 		messageBox->messageNoClicked.connect(this, &InstallWindow::OnFailContinueNo);
+
+		const u64 failWaitStart = OSGetTime();
+		int prevFailSec = -1;
 		while (failContinueChoice == 0 && !canceled)
-			usleep(20000);
+		{
+			__sync_synchronize();
+			const u32 elapsedMs = OSTicksToMilliseconds(OSGetTime() - failWaitStart);
+			if (elapsedMs >= 10000u)
+			{
+				failContinueChoice = 1;
+				__sync_synchronize();
+				AppendInstallLog(strfmt("FAIL prompt timeout 10s -> YES next queue item (%s)", gameName.c_str()));
+				break;
+			}
+			const int secLeft = 10 - (int)(elapsedMs / 1000u);
+			if (secLeft != prevFailSec && secLeft >= 1 && secLeft <= 10)
+			{
+				prevFailSec = secLeft;
+				messageBox->setMessage2(failPrompt + fmt("\n%d 秒后自动选择「是」…", secLeft));
+			}
+			usleep(16666);
+			OSYieldThread();
+		}
 		messageBox->messageYesClicked.disconnect(this);
 		messageBox->messageNoClicked.disconnect(this);
 

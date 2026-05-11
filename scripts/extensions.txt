@@ -1,0 +1,6 @@
+# 与本脚本同目录的 extensions.txt：列出要追加扫描的扩展名（与脚本内置列表合并）
+# 规则：UTF-8；空格或换行分隔；可写 .lang 或 lang；# 开头行为注释
+#
+# 示例（去掉行首 # 即生效）：
+# .lang .po .pot .yaml .yml
+.lang

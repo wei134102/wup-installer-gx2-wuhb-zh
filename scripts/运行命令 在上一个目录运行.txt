@@ -1,0 +1,1 @@
+python scripts\extract_unique_chars.py --skip-whitespace --out scripts\charset_for_font.txt
