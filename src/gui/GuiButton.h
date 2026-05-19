@@ -94,6 +94,8 @@ class GuiButton : public GuiElement
 		void update(GuiController * c);
 		
 		void check(void);
+		bool isChecked(void) const { return checked; }
+		void setChecked(bool c) { checked = c; }
 		
 		sigslot::signal2<GuiButton *, const GuiController *> selected;
 		sigslot::signal2<GuiButton *, const GuiController *> deSelected;

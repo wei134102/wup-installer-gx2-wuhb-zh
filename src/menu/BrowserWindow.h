@@ -39,6 +39,8 @@ private:
 	void OnPlusButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 	void OnMinusButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 	void OnInstallButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void OnIdListButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void SyncFolderButtonChecks();
 	
 	void OnScrollbarListChange(int selectItem, int pageIndex);
 	
@@ -55,6 +57,7 @@ private:
     GuiImage selectImg;
     GuiImage unselectImg;
     GuiImage installImg;
+    GuiImage idListBgImg;
 
 	GuiImageData *plusImageData;
     GuiImageData *minusImageData;
@@ -64,6 +67,7 @@ private:
 	GuiText plusTxt;
 	GuiText minusTxt;
 	GuiText installTxt;
+	GuiText idListTxt;
     
 	GuiTrigger touchTrigger;
     GuiTrigger buttonATrigger;
@@ -82,10 +86,12 @@ private:
 	GuiButton plusButton;
 	GuiButton minusButton;
 	GuiButton installButton;
+	GuiButton idListButton;
 	
     GuiImage* plusButtonSelectedImage;
     GuiImage* minusButtonSelectedImage;
     GuiImage* installButtonSelectedImage;
+    GuiImage* idListButtonSelectedImage;
 
     int pageIndex;
 	int selectedItem;

@@ -15,6 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  ****************************************************************************/
 #include "BrowserWindow.h"
+#include "fs/IdListSelect.hpp"
+#include "gui/MessageBox.h"
 
 #define MAX_FOLDERS_PER_PAGE 3
 
@@ -30,6 +32,7 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, selectImg(selectImageData)
 	, unselectImg(selectImageData)
 	, installImg(selectImageData)
+	, idListBgImg(selectImageData)
     , plusImageData(Resources::GetImageData("plus.png"))
     , minusImageData(Resources::GetImageData("minus.png"))
 	, plusImg(plusImageData)
@@ -37,6 +40,7 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, plusTxt("选择全部", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
 	, minusTxt("取消全选", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
 	, installTxt("安装", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
+	, idListTxt("ID安装", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
     , touchTrigger(GuiTrigger::CHANNEL_1, GuiTrigger::VPAD_TOUCH)
     , buttonATrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A, true)
     , buttonUpTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_UP | GuiTrigger::STICK_L_UP, true)
@@ -50,6 +54,7 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, plusButton(selectImg.getWidth(), selectImg.getHeight())
 	, minusButton(selectImg.getWidth(), selectImg.getHeight())
 	, installButton(selectImg.getWidth(), selectImg.getHeight())
+	, idListButton(selectImg.getWidth(), selectImg.getHeight())
 {
 	folderList = list;
 	pageIndex = 0;
@@ -112,14 +117,20 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
     AButton.clicked.connect(this, &BrowserWindow::OnAButtonClick);
 	this->append(&AButton);
 
+	const int btnW = selectImg.getWidth();
+	const int btnH = selectImg.getHeight();
+	const int btnStep = btnH + 8;
+	const int btnX = 240;
+	const int btnY0 = -95;
+
 	plusImg.setAlignment(ALIGN_BOTTOM | ALIGN_RIGHT);
 	plusImg.setPosition(-10, 10);
-    plusTxt.setMaxWidth(selectImg.getWidth()-5, GuiText::WRAP);
+    plusTxt.setMaxWidth(btnW - 5, GuiText::WRAP);
     plusButton.setLabel(&plusTxt);
     plusButton.setImage(&selectImg);
 	plusButton.setIcon(&plusImg);
     plusButton.setAlignment(ALIGN_TOP | ALIGN_RIGHT);
-    plusButton.setPosition(240, -135);
+    plusButton.setPosition(btnX, btnY0);
     plusButton.clicked.connect(this, &BrowserWindow::OnPlusButtonClick);
     plusButton.setTrigger(&plusTrigger);
     plusButton.setTrigger(&touchTrigger);
@@ -133,12 +144,12 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 
     minusImg.setAlignment(ALIGN_BOTTOM | ALIGN_RIGHT);
 	minusImg.setPosition(-10, 10);
-	minusTxt.setMaxWidth(unselectImg.getWidth()-5, GuiText::WRAP);
+	minusTxt.setMaxWidth(btnW - 5, GuiText::WRAP);
     minusButton.setLabel(&minusTxt);
     minusButton.setImage(&unselectImg);
 	minusButton.setIcon(&minusImg);
     minusButton.setAlignment(ALIGN_TOP | ALIGN_RIGHT);
-    minusButton.setPosition(240, -(selectImg.getWidth()+20) - 135);
+    minusButton.setPosition(btnX, btnY0 - btnStep);
     minusButton.clicked.connect(this, &BrowserWindow::OnMinusButtonClick);
     minusButton.setTrigger(&minusTrigger);
     minusButton.setTrigger(&touchTrigger);
@@ -150,11 +161,11 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
     this->append(&minusButton);
 	rightSideButtons.push_back(&minusButton);
 	
-	installTxt.setMaxWidth(unselectImg.getWidth()-5, GuiText::WRAP);
+	installTxt.setMaxWidth(btnW - 5, GuiText::WRAP);
     installButton.setLabel(&installTxt);
     installButton.setImage(&installImg);
 	installButton.setAlignment(ALIGN_TOP | ALIGN_RIGHT);
-    installButton.setPosition(240, -(selectImg.getWidth()+20)*2 - 135);
+    installButton.setPosition(btnX, btnY0 - btnStep * 2);
     installButton.clicked.connect(this, &BrowserWindow::OnInstallButtonClick);
     installButton.setTrigger(&touchTrigger);
     installButton.setSoundClick(buttonClickSound);
@@ -164,6 +175,27 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	installButton.setImageSelectOver(installButtonSelectedImage);
     this->append(&installButton);
 	rightSideButtons.push_back(&installButton);
+
+	idListTxt.setMaxWidth(btnW - 5, GuiText::WRAP);
+	idListButton.setLabel(&idListTxt);
+	idListButton.setImage(&idListBgImg);
+	idListButton.setAlignment(ALIGN_TOP | ALIGN_RIGHT);
+	idListButton.setPosition(btnX, btnY0 - btnStep * 3);
+	idListButton.clicked.connect(this, &BrowserWindow::OnIdListButtonClick);
+	idListButton.setTrigger(&touchTrigger);
+	idListButton.setSoundClick(buttonClickSound);
+	idListButton.setEffectGrow();
+	idListButton.setSelectable(true);
+	idListButtonSelectedImage = new GuiImage(selectSelectedImageData);
+	idListButton.setImageSelectOver(idListButtonSelectedImage);
+	this->append(&idListButton);
+	rightSideButtons.push_back(&idListButton);
+}
+
+void BrowserWindow::SyncFolderButtonChecks()
+{
+	for(int i = 0; i < buttonCount; i++)
+		folderButtons[i].folderButton->setChecked(folderList->IsSelected(i));
 }
 
 BrowserWindow::~BrowserWindow()
@@ -183,6 +215,7 @@ BrowserWindow::~BrowserWindow()
 	delete plusButtonSelectedImage;
 	delete minusButtonSelectedImage;
 	delete installButtonSelectedImage;
+	delete idListButtonSelectedImage;
 
     Resources::RemoveImageData(buttonImageData);
     Resources::RemoveImageData(buttonCheckedImageData);
@@ -209,7 +242,7 @@ int BrowserWindow::SearchSelectedButton()
 int BrowserWindow::SearchSelectedRightSideButton()
 {
 	int index = -1;
-	for(int i = 0; i < 3 && index < 0; i++)
+	for(int i = 0; i < (int)rightSideButtons.size() && index < 0; i++)
 	{
 		if(rightSideButtons[i]->getState() == STATE_SELECTED)
 			index = i;
@@ -312,7 +345,7 @@ void BrowserWindow::OnDPADClick(GuiButton *button, const GuiController *controll
 			index--;
 			rightSideButtons[index]->setState(STATE_SELECTED);
 		}
-		else if(trigger == &buttonDownTrigger && index < 2)
+		else if(trigger == &buttonDownTrigger && index < (int)rightSideButtons.size() - 1)
 		{
 			if(index >= 0)
 				rightSideButtons[index]->clearState(STATE_SELECTED);
@@ -384,6 +417,35 @@ void BrowserWindow::OnMinusButtonClick(GuiButton *button, const GuiController *c
 
 void BrowserWindow::OnInstallButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
 {
+	installButtonClicked(this);
+}
+
+void BrowserWindow::OnIdListButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
+{
+	folderList->UnSelectAll();
+	int matched = CFolderList_SelectFromIdTxt(folderList);
+	SyncFolderButtonChecks();
+
+	if(matched < 0)
+	{
+		MessageBox *box = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONERROR, false);
+		box->setTitle("ID.txt");
+		box->setMessage1("未找到 install/ID.txt");
+		box->setMessage2("请将 U-Wii-X 导出的 ID.txt 放到 SD 卡 install 目录");
+		this->append(box);
+		return;
+	}
+
+	if(matched == 0)
+	{
+		MessageBox *box = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONEXCLAMATION, false);
+		box->setTitle("ID.txt");
+		box->setMessage1("ID.txt 中没有匹配的安装包");
+		box->setMessage2("请确认 Title ID 与文件夹名或 title.tmd 一致");
+		this->append(box);
+		return;
+	}
+
 	installButtonClicked(this);
 }
 
