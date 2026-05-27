@@ -127,6 +127,8 @@ public:
     {
         guiMutex.unlock();
     }
+
+	void prepareProcUIBackground(void);
 	
 private:
     void SetupMainView(void);

@@ -15,8 +15,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  ****************************************************************************/
 #include "BrowserWindow.h"
+#include "Application.h"
 #include "fs/IdListSelect.hpp"
+#include "fs/IdInstalledExport.hpp"
 #include "gui/MessageBox.h"
+#include "menu/MainWindow.h"
+#include "utils/StringTools.h"
 
 #define MAX_FOLDERS_PER_PAGE 3
 
@@ -33,6 +37,7 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, unselectImg(selectImageData)
 	, installImg(selectImageData)
 	, idListBgImg(selectImageData)
+	, exportIdBgImg(selectImageData)
     , plusImageData(Resources::GetImageData("plus.png"))
     , minusImageData(Resources::GetImageData("minus.png"))
 	, plusImg(plusImageData)
@@ -41,6 +46,7 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, minusTxt("取消全选", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
 	, installTxt("安装", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
 	, idListTxt("ID安装", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
+	, exportIdTxt("提取ID", 42, glm::vec4(0.9f, 0.9f, 0.9f, 1.0f))
     , touchTrigger(GuiTrigger::CHANNEL_1, GuiTrigger::VPAD_TOUCH)
     , buttonATrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_A, true)
     , buttonUpTrigger(GuiTrigger::CHANNEL_ALL, GuiTrigger::BUTTON_UP | GuiTrigger::STICK_L_UP, true)
@@ -55,6 +61,14 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	, minusButton(selectImg.getWidth(), selectImg.getHeight())
 	, installButton(selectImg.getWidth(), selectImg.getHeight())
 	, idListButton(selectImg.getWidth(), selectImg.getHeight())
+	, exportIdButton(selectImg.getWidth(), selectImg.getHeight())
+	, idMessageOverlay(nullptr)
+	, idMessageBox(nullptr)
+	, exportJobActive(false)
+	, exportCtx(nullptr)
+	, exportJobResult(0)
+	, exportJobNandCount(0)
+	, exportJobUsbCount(0)
 {
 	folderList = list;
 	pageIndex = 0;
@@ -119,7 +133,9 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 
 	const int btnW = selectImg.getWidth();
 	const int btnH = selectImg.getHeight();
-	const int btnStep = btnH + 8;
+	const int kRightBtnCount = 5;
+	/* 原 4 个按钮占 3 个间距；5 个按钮在同一高度内均分 */
+	const int btnStep = ((btnH + 8) * (kRightBtnCount - 2)) / (kRightBtnCount - 1);
 	const int btnX = 240;
 	const int btnY0 = -95;
 
@@ -190,6 +206,21 @@ BrowserWindow::BrowserWindow(int w, int h, CFolderList * list)
 	idListButton.setImageSelectOver(idListButtonSelectedImage);
 	this->append(&idListButton);
 	rightSideButtons.push_back(&idListButton);
+
+	exportIdTxt.setMaxWidth(btnW - 5, GuiText::WRAP);
+	exportIdButton.setLabel(&exportIdTxt);
+	exportIdButton.setImage(&exportIdBgImg);
+	exportIdButton.setAlignment(ALIGN_TOP | ALIGN_RIGHT);
+	exportIdButton.setPosition(btnX, btnY0 - btnStep * 4);
+	exportIdButton.clicked.connect(this, &BrowserWindow::OnExportInstalledIdClick);
+	exportIdButton.setTrigger(&touchTrigger);
+	exportIdButton.setSoundClick(buttonClickSound);
+	exportIdButton.setEffectGrow();
+	exportIdButton.setSelectable(true);
+	exportIdButtonSelectedImage = new GuiImage(selectSelectedImageData);
+	exportIdButton.setImageSelectOver(exportIdButtonSelectedImage);
+	this->append(&exportIdButton);
+	rightSideButtons.push_back(&exportIdButton);
 }
 
 void BrowserWindow::SyncFolderButtonChecks()
@@ -200,6 +231,10 @@ void BrowserWindow::SyncFolderButtonChecks()
 
 BrowserWindow::~BrowserWindow()
 {
+	finishExportBeforeBackground();
+
+	CloseIdModalImmediate();
+
     for(u32 i = 0; i < folderButtons.size(); ++i)
     {
         delete folderButtons[i].folderButtonImg;
@@ -216,6 +251,7 @@ BrowserWindow::~BrowserWindow()
 	delete minusButtonSelectedImage;
 	delete installButtonSelectedImage;
 	delete idListButtonSelectedImage;
+	delete exportIdButtonSelectedImage;
 
     Resources::RemoveImageData(buttonImageData);
     Resources::RemoveImageData(buttonCheckedImageData);
@@ -432,7 +468,8 @@ void BrowserWindow::OnIdListButtonClick(GuiButton *button, const GuiController *
 		box->setTitle("ID.txt");
 		box->setMessage1("未找到 install/ID.txt");
 		box->setMessage2("请将 U-Wii-X 导出的 ID.txt 放到 SD 卡 install 目录");
-		this->append(box);
+		box->messageOkClicked.connect(this, &BrowserWindow::OnIdTxtMessageBoxClick);
+		AppendModalMessageBox(box);
 		return;
 	}
 
@@ -442,11 +479,189 @@ void BrowserWindow::OnIdListButtonClick(GuiButton *button, const GuiController *
 		box->setTitle("ID.txt");
 		box->setMessage1("ID.txt 中没有匹配的安装包");
 		box->setMessage2("请确认 Title ID 与文件夹名或 title.tmd 一致");
-		this->append(box);
+		box->messageOkClicked.connect(this, &BrowserWindow::OnIdTxtMessageBoxClick);
+		AppendModalMessageBox(box);
 		return;
 	}
 
 	installButtonClicked(this);
+}
+
+void BrowserWindow::update(GuiController *controller)
+{
+	PollExportJob();
+	GuiFrame::update(controller);
+}
+
+void BrowserWindow::finishExportBeforeBackground(void)
+{
+	if(!exportJobActive || !exportCtx)
+		return;
+
+	IdInstalled_Export_RequestCancel(exportCtx);
+	while(!IdInstalled_Export_Step(exportCtx))
+		;
+
+	IdInstalled_ExportContext_Destroy(exportCtx);
+	exportCtx = nullptr;
+	exportJobActive = false;
+	CloseIdModalImmediate();
+}
+
+void BrowserWindow::PollExportJob(void)
+{
+	if(!exportJobActive || !exportCtx)
+		return;
+
+	if(!IdInstalled_Export_Step(exportCtx))
+		return;
+
+	exportJobResult = IdInstalled_Export_GetResult(exportCtx, &exportJobNandCount, &exportJobUsbCount);
+	IdInstalled_ExportContext_Destroy(exportCtx);
+	exportCtx = nullptr;
+	exportJobActive = false;
+
+	CloseIdModalImmediate();
+	ShowExportResultMessage(exportJobResult, exportJobNandCount, exportJobUsbCount);
+}
+
+void BrowserWindow::ShowExportResultMessage(int total, unsigned int nandCount, unsigned int usbCount)
+{
+	MessageBox *box = nullptr;
+	if(total < 0)
+	{
+		box = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONERROR, false);
+		box->setTitle("id_installed.txt");
+		if(total == -1)
+		{
+			box->setMessage1("无法打开 MCP");
+			box->setMessage2("请稍后重试\n已写 install/id_installed_log.txt");
+		}
+		else if(total == -3)
+		{
+			box->setMessage1("内存不足，无法查询已安装游戏");
+			box->setMessage2("请关闭其它应用后重试\n已写 install/id_installed_log.txt");
+		}
+		else
+		{
+			box->setMessage1("无法写入 install/id_installed.txt");
+			box->setMessage2("请确认 SD 卡已挂载且可写\n已写 install/id_installed_log.txt");
+		}
+	}
+	else
+	{
+		box = new MessageBox(MessageBox::BT_OK, MessageBox::IT_ICONINFORMATION, false);
+		box->setTitle("id_installed.txt");
+		box->setMessage1(fmt("已导出 %d 个游戏 ID", total));
+		box->setMessage2(fmt("主机 %u 个，USB %u 个\n详见 install/id_installed_log.txt", nandCount, usbCount));
+	}
+
+	box->messageOkClicked.connect(this, &BrowserWindow::OnIdTxtMessageBoxClick);
+	AppendModalMessageBox(box);
+}
+
+void BrowserWindow::OnExportInstalledIdClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger)
+{
+	(void)button;
+	(void)controller;
+	(void)trigger;
+
+	if(exportJobActive)
+		return;
+
+	exportJobActive = true;
+	exportJobResult = 0;
+	exportJobNandCount = 0;
+	exportJobUsbCount = 0;
+	exportCtx = nullptr;
+
+	IdInstalled_ExportContext_Create(&exportCtx);
+	if(!exportCtx)
+	{
+		exportJobActive = false;
+		ShowExportResultMessage(-3, 0, 0);
+		return;
+	}
+
+	IdInstalled_Export_Begin(exportCtx);
+
+	MessageBox *waitBox = new MessageBox(MessageBox::BT_NOBUTTON, MessageBox::IT_ICONINFORMATION, true);
+	waitBox->setTitle("id_installed.txt");
+	waitBox->setMessage1("正在查询已安装游戏");
+	waitBox->setMessage2("请稍候，期间可按 HOME");
+	AppendModalMessageBox(waitBox);
+}
+
+void BrowserWindow::CloseIdModalImmediate(void)
+{
+	if(!idMessageOverlay)
+		return;
+
+	MainWindow *mainWindow = Application::instance()->getMainWindow();
+	if(mainWindow)
+		mainWindow->remove(idMessageOverlay);
+
+	if(idMessageBox)
+	{
+		idMessageBox->messageOkClicked.disconnect(this);
+		idMessageOverlay->remove(idMessageBox);
+		delete idMessageBox;
+		idMessageBox = nullptr;
+	}
+
+	delete idMessageOverlay;
+	idMessageOverlay = nullptr;
+
+	clearState(GuiElement::STATE_DISABLED);
+}
+
+void BrowserWindow::AppendModalMessageBox(MessageBox *box)
+{
+	if(!box)
+		return;
+
+	CloseIdModalImmediate();
+
+	MainWindow *mainWindow = Application::instance()->getMainWindow();
+	if(!mainWindow)
+	{
+		delete box;
+		return;
+	}
+
+	idMessageBox = box;
+	idMessageOverlay = new GuiFrame(0, 0);
+	idMessageOverlay->setEffect(EFFECT_FADE, 10, 255);
+	idMessageOverlay->setState(GuiElement::STATE_DISABLED);
+	idMessageOverlay->effectFinished.connect(this, &BrowserWindow::OnModalMessageOverlayOpened);
+	idMessageOverlay->append(box);
+
+	mainWindow->append(idMessageOverlay);
+}
+
+void BrowserWindow::OnModalMessageOverlayOpened(GuiElement *element)
+{
+	element->effectFinished.disconnect(this);
+	element->clearState(GuiElement::STATE_DISABLED);
+}
+
+void BrowserWindow::OnIdTxtMessageBoxClick(GuiElement *element, int val)
+{
+	(void)element;
+	(void)val;
+
+	if(!idMessageOverlay)
+		return;
+
+	idMessageOverlay->setEffect(EFFECT_FADE, -10, 255);
+	idMessageOverlay->setState(GuiElement::STATE_DISABLED);
+	idMessageOverlay->effectFinished.connect(this, &BrowserWindow::OnIdTxtMessageBoxClosed);
+}
+
+void BrowserWindow::OnIdTxtMessageBoxClosed(GuiElement *element)
+{
+	(void)element;
+	CloseIdModalImmediate();
 }
 
 void BrowserWindow::OnScrollbarListChange(int selItem, int selIndex)

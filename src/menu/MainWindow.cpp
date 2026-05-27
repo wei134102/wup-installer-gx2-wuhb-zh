@@ -287,3 +287,9 @@ void MainWindow::OnCloseEffectFinish(GuiElement *element)
 	remove(element);
 	AsyncDeleter::pushForDelete(element);
 }
+
+void MainWindow::prepareProcUIBackground(void)
+{
+	if(browserWindow)
+		browserWindow->finishExportBeforeBackground();
+}

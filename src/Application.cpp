@@ -151,12 +151,16 @@ bool Application::procUI(void)
 		case PROCUI_STATUS_EXITING:
 		{
 			log_printf("PROCUI_STATUS_EXITING\n");
+			if(mainWindow)
+				mainWindow->prepareProcUIBackground();
 			exitApplication = true;
 			break;
 		}
 		case PROCUI_STATUS_RELEASE_FOREGROUND:
 		{
 			log_printf("PROCUI_STATUS_RELEASE_FOREGROUND\n");
+			if(mainWindow)
+				mainWindow->prepareProcUIBackground();
 			if(video != nullptr)
 			{
 				// we can turn of the screen but we don't need to and it will display the last image
@@ -197,7 +201,7 @@ bool Application::procUI(void)
 					
 					//! setup default Font
 					log_printf("Initialize main font system\n");
-					auto *fontSystem = new FreeTypeGX(Resources::GetFile("font.ttf"), Resources::GetFileSize("font.ttf"), true);
+					fontSystem = new FreeTypeGX(Resources::GetFile("font.ttf"), Resources::GetFileSize("font.ttf"), true);
 					GuiText::setPresetFont(fontSystem);
 
 					if (mainWindow == nullptr)

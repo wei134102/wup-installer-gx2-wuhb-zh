@@ -21,11 +21,18 @@
 #include "gui/Scrollbar.h"
 #include "fs/CFolderList.hpp"
 
+struct IdInstalledExportContext;
+class MessageBox;
+
 class BrowserWindow : public GuiFrame, public sigslot::has_slots<>
 {
 public:
     BrowserWindow(int w, int h, CFolderList * folderList);
     virtual ~BrowserWindow();
+
+	void update(GuiController *controller) override;
+	//! Cancel in-progress export and close MCP before ProcUI releases GX2.
+	void finishExportBeforeBackground(void);
 	
 	sigslot::signal1<GuiElement *> installButtonClicked;
 	
@@ -40,6 +47,14 @@ private:
 	void OnMinusButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 	void OnInstallButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
 	void OnIdListButtonClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void OnExportInstalledIdClick(GuiButton *button, const GuiController *controller, GuiTrigger *trigger);
+	void AppendModalMessageBox(MessageBox *box);
+	void CloseIdModalImmediate(void);
+	void ShowExportResultMessage(int total, unsigned int nandCount, unsigned int usbCount);
+	void PollExportJob(void);
+	void OnModalMessageOverlayOpened(GuiElement *element);
+	void OnIdTxtMessageBoxClick(GuiElement *element, int val);
+	void OnIdTxtMessageBoxClosed(GuiElement *element);
 	void SyncFolderButtonChecks();
 	
 	void OnScrollbarListChange(int selectItem, int pageIndex);
@@ -58,6 +73,7 @@ private:
     GuiImage unselectImg;
     GuiImage installImg;
     GuiImage idListBgImg;
+    GuiImage exportIdBgImg;
 
 	GuiImageData *plusImageData;
     GuiImageData *minusImageData;
@@ -68,6 +84,7 @@ private:
 	GuiText minusTxt;
 	GuiText installTxt;
 	GuiText idListTxt;
+	GuiText exportIdTxt;
     
 	GuiTrigger touchTrigger;
     GuiTrigger buttonATrigger;
@@ -87,11 +104,13 @@ private:
 	GuiButton minusButton;
 	GuiButton installButton;
 	GuiButton idListButton;
+	GuiButton exportIdButton;
 	
     GuiImage* plusButtonSelectedImage;
     GuiImage* minusButtonSelectedImage;
     GuiImage* installButtonSelectedImage;
     GuiImage* idListButtonSelectedImage;
+    GuiImage* exportIdButtonSelectedImage;
 
     int pageIndex;
 	int selectedItem;
@@ -113,6 +132,15 @@ private:
     std::vector<FolderButton> folderButtons;
 	
 	CFolderList * folderList;
+
+	GuiFrame *idMessageOverlay;
+	MessageBox *idMessageBox;
+
+	bool exportJobActive;
+	IdInstalledExportContext *exportCtx;
+	int exportJobResult;
+	unsigned int exportJobNandCount;
+	unsigned int exportJobUsbCount;
 };
 
 #endif //_BROSERWINDOW_H_
